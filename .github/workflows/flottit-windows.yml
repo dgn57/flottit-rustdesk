@@ -1,0 +1,352 @@
+# FlottIT Connect – Windows-Build (x64, Portable-Single-EXE)
+#
+# Diese Datei liegt im Repo flottit-connect unter ci/build-windows.yml und wird von
+# client/apply-branding.sh als .github/workflows/flottit-windows.yml in den
+# öffentlichen Fork flottit-rustdesk kopiert. Dort läuft der Build (öffentliche
+# Repos haben unbegrenzte Actions-Minuten, und Quellcode + Binary liegen gemeinsam
+# öffentlich – AGPL).
+#
+# Basis: .github/workflows/flutter-build.yml von RustDesk 1.5.3 (Job
+# build-for-windows-flutter), reduziert auf x86_64 ohne MSI, ohne Druckertreiber,
+# ohne virtuelles Display und ohne RustDesk-eigene Signatur-/Update-Infrastruktur.
+name: FlottIT Windows-Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      rust-tests:
+        description: "Rust-Tests (inkl. src/flottit.rs) zusätzlich ausführen"
+        type: boolean
+        default: true
+  push:
+    branches: ["flottit", "flottit-techniker"]
+    tags: ["flottit-*"]
+
+permissions:
+  contents: write
+
+env:
+  # Werte aus flutter-build.yml von RustDesk 1.5.3 (siehe docs/VERSIONEN.md)
+  RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  TARGET: x86_64-pc-windows-msvc
+  VCPKG_TRIPLET: x64-windows-static
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build:
+    name: Build FlottIT-Connect.exe
+    needs: [generate-bridge]
+    runs-on: windows-2022
+    outputs:
+      exe-name: ${{ steps.name.outputs.exe }}
+    steps:
+      - name: GitHub-Actions-Cache-Variablen für vcpkg exportieren
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Quellcode auschecken
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: EXE-Name bestimmen
+        id: name
+        shell: bash
+        run: |
+          # BINARY_NAME wurde von apply-branding.sh gesetzt (FlottIT-Connect / FlottIT-Techniker)
+          exe=$(grep -oP 'set\(BINARY_NAME "\K[^"]+' flutter/windows/CMakeLists.txt)
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+          echo "VERSION=$(grep -m1 '^version = "' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+
+      - name: Bridge-Dateien holen
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: LLVM und Clang installieren
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Flutter installieren
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+          cache: true
+
+      - name: RustDesk-Flutter-Engine einsetzen (wie upstream)
+        shell: pwsh
+        run: |
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          $engine = Join-Path (Split-Path (Get-Command flutter).Source) "cache/artifacts/engine/windows-x64-release"
+          Move-Item -Force windows-x64-release/* $engine
+
+      - name: Flutter patchen (wie upstream)
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
+          cd $(dirname $(dirname $(which flutter)))
+          # Idempotent: aus dem Flutter-Cache kann der Patch schon angewendet sein
+          if git apply --reverse --check flutter_3.24.4_dropdown_menu_enableFilter.diff 2>/dev/null; then
+            echo "Patch bereits angewendet (Flutter aus Cache)."
+          else
+            git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
+
+      - name: Rust installieren
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ env.TARGET }}
+          components: "rustfmt"
+
+      - name: Rust-Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: flottit-windows
+
+      - name: vcpkg mit Binär-Cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: vcpkg-Abhängigkeiten installieren
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
+        shell: bash
+        run: |
+          if ! $VCPKG_ROOT/vcpkg install --triplet $VCPKG_TRIPLET --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r f; do echo "$f:"; cat "$f"; done
+            exit 1
+          fi
+
+      - name: FlottIT-Einstellungen prüfen (vor dem Build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'pub mod flottit;' src/lib.rs
+          grep -q 'crate::flottit::apply();' src/common.rs
+          ! grep -rn 'rs-ny.rustdesk.com\|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=' src libs/hbb_common/src flutter/lib
+          grep -n 'FLOTTIT_HOST\|FLOTTIT_VARIANTE' src/flottit.rs | head -3
+
+      - name: Bauen
+        shell: pwsh
+        run: |
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          if ($LASTEXITCODE -ne 0) { throw "build.py fehlgeschlagen" }
+          Move-Item ./flutter/build/windows/x64/runner/Release ./rustdesk
+          if (-not (Test-Path "./rustdesk/$env:EXE.exe")) { Get-ChildItem ./rustdesk; throw "$env:EXE.exe fehlt" }
+
+      - name: Code-Signing (nur wenn Secrets vorhanden) – Inhalt
+        id: sign-inner
+        shell: pwsh
+        env:
+          SIGN_CERT: ${{ secrets.SIGN_CERT }}
+          SIGN_PASSWORD: ${{ secrets.SIGN_PASSWORD }}
+        run: |
+          if (-not $env:SIGN_CERT) {
+            Write-Output "::warning title=Unsigniert::Keine Signatur-Secrets (SIGN_CERT/SIGN_PASSWORD) – Build bleibt UNSIGNIERT. Windows SmartScreen wird warnen. Siehe docs/SIGNIERUNG.md."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_CERT))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          Get-ChildItem ./rustdesk -Recurse -Include *.exe,*.dll | ForEach-Object {
+            & $signtool.FullName sign /f $pfx /p $env:SIGN_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signieren fehlgeschlagen: $($_.FullName)" }
+          }
+          Remove-Item $pfx
+
+      - name: Single-EXE packen (Portable-Packer von RustDesk)
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/${EXE}.exe"
+          popd
+          mkdir -p ./dist
+          mv ./target/release/rustdesk-portable-packer.exe "./dist/${EXE}.exe"
+
+      - name: Code-Signing (nur wenn Secrets vorhanden) – EXE
+        shell: pwsh
+        env:
+          SIGN_CERT: ${{ secrets.SIGN_CERT }}
+          SIGN_PASSWORD: ${{ secrets.SIGN_PASSWORD }}
+        run: |
+          if (-not $env:SIGN_CERT) { Write-Output "Unsigniert (siehe Warnung oben)."; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_CERT))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:SIGN_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 "./dist/$env:EXE.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Signieren fehlgeschlagen" }
+          Remove-Item $pfx
+
+      - name: Prüfsummen
+        shell: bash
+        run: |
+          cd dist
+          sha256sum "${EXE}.exe" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          ls -la
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.exe }}-windows-x64
+          path: dist/
+          if-no-files-found: error
+
+  rust-tests:
+    name: Rust-Tests (flottit-Modul)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rust-tests }}
+    needs: [generate-bridge]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+      - uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ env.TARGET }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: flottit-windows-test
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+      - name: vcpkg-Abhängigkeiten
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
+        shell: bash
+        run: $VCPKG_ROOT/vcpkg install --triplet $VCPKG_TRIPLET --x-install-root="$VCPKG_ROOT/installed"
+      - name: cargo test flottit
+        shell: bash
+        run: |
+          FEATURES=$(python3 ./build.py --portable --flutter --skip-portable-pack --hwcodec --vram --print-features)
+          cargo test --release --lib --features "$FEATURES" flottit -- --test-threads=1
+
+  smoke-test:
+    name: Smoke-Test auf windows-latest
+    needs: [build]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.exe-name }}-windows-x64
+          path: dist
+      - name: Dateieigenschaften, Start, 15 s Laufzeit, sauberes Beenden
+        shell: pwsh
+        env:
+          EXE: ${{ needs.build.outputs.exe-name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfad = (Resolve-Path "dist/$env:EXE.exe").Path
+          $soll = (Get-Content dist/SHA256SUMS.txt).Split(" ")[0]
+          $ist = (Get-FileHash $pfad -Algorithm SHA256).Hash.ToLower()
+          if ($soll -ne $ist) { throw "Prüfsumme stimmt nicht" }
+
+          $info = (Get-Item $pfad).VersionInfo
+          $info | Format-List ProductName, CompanyName, ProductVersion, FileVersion, FileDescription, OriginalFilename, LegalCopyright
+          $produkt = if ($env:EXE -eq "FlottIT-Connect") { "FlottIT Connect" } else { "FlottIT Techniker" }
+          if ($info.ProductName -ne $produkt) { throw "ProductName falsch: $($info.ProductName)" }
+          if ($info.CompanyName -ne "FlottIT") { throw "CompanyName falsch: $($info.CompanyName)" }
+          if (-not $info.ProductVersion) { throw "ProductVersion fehlt" }
+          if ($info.LegalCopyright -notmatch "AGPL") { throw "AGPL-Hinweis fehlt im Copyright" }
+
+          # Adressen öffentlicher RustDesk-Server merken, um Verbindungen dorthin zu erkennen
+          $fremd = @()
+          foreach ($h in @("rs-ny.rustdesk.com","rs-sg.rustdesk.com","rs-cn.rustdesk.com","api.rustdesk.com","admin.rustdesk.com")) {
+            try { $fremd += (Resolve-DnsName $h -ErrorAction Stop | Where-Object { $_.IPAddress }).IPAddress } catch {}
+          }
+          Write-Output "Öffentliche RustDesk-Adressen: $($fremd -join ', ')"
+
+          Start-Process -FilePath $pfad
+          $verbindungen = @()
+          for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 1
+            $p = Get-Process -Name $env:EXE -ErrorAction SilentlyContinue
+            if ($p) { $verbindungen += Get-NetTCPConnection -OwningProcess $p.Id -ErrorAction SilentlyContinue }
+          }
+          $prozesse = Get-Process -Name $env:EXE -ErrorAction SilentlyContinue
+          if (-not $prozesse) { throw "$env:EXE läuft nach 15 s nicht mehr (Absturz?)" }
+          $prozesse | Format-Table Id, ProcessName, StartTime, Path
+          $boese = $verbindungen | Where-Object { $fremd -contains $_.RemoteAddress }
+          if ($boese) { $boese | Format-Table; throw "Verbindung zu öffentlichem RustDesk-Server erkannt!" }
+          Write-Output "Keine Verbindung zu öffentlichen RustDesk-Servern beobachtet."
+
+          # Bildschirmfoto des Runners (zur Sichtprüfung des Startfensters, als Artefakt)
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            New-Item -ItemType Directory -Force screenshot | Out-Null
+            $bmp.Save("screenshot/startfenster.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          } catch { Write-Output "::warning::Screenshot nicht möglich: $($_.Exception.Message)" }
+
+          $prozesse | Stop-Process -Force
+          Start-Sleep -Seconds 3
+          if (Get-Process -Name $env:EXE -ErrorAction SilentlyContinue) { throw "Prozess ließ sich nicht beenden" }
+          # Kein Dienst und kein Autostart angelegt?
+          if (Get-Service | Where-Object { $_.Name -match "FlottIT|RustDesk" }) { throw "Es wurde ein Dienst installiert!" }
+          $run = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
+          if ($run -and ($run.PSObject.Properties.Name -match "FlottIT|RustDesk")) { throw "Autostart-Eintrag gefunden!" }
+          Write-Output "Smoke-Test bestanden."
+      - name: Screenshot hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-${{ needs.build.outputs.exe-name }}
+          path: screenshot/
+          if-no-files-found: ignore
+
+  release:
+    name: Release im Fork veröffentlichen (nur bei Tag flottit-*)
+    if: startsWith(github.ref, 'refs/tags/flottit-')
+    needs: [build, smoke-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.exe-name }}-windows-x64
+          path: dist
+      - name: GitHub-Release mit EXE und Prüfsummen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "FlottIT-Build auf Basis von RustDesk (AGPL-3.0). Quellcode: dieser Tag. Siehe FLOTTIT.md."

@@ -1308,7 +1308,8 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    // FlottIT: kein Fallback auf den öffentlichen RustDesk-API-Server
+    String::new()
 }
 
 #[inline]
@@ -2507,6 +2508,12 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
 }
 
 pub fn load_custom_client() {
+    // FlottIT: feste Einstellungen IMMER nach custom.txt anwenden
+    load_custom_client_original();
+    crate::flottit::apply();
+}
+
+fn load_custom_client_original() {
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {
         read_custom_client(data.trim());

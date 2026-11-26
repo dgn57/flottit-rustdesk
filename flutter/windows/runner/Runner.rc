@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "Purslane Tech Pte. Ltd." "\0"
-            VALUE "FileDescription", "RustDesk Remote Desktop" "\0"
+            VALUE "CompanyName", "FlottIT" "\0"
+            VALUE "FileDescription", "FlottIT Connect - Fernwartung" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "rustdesk" "\0"
-            VALUE "LegalCopyright", "Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved." "\0"
-            VALUE "OriginalFilename", "rustdesk.exe" "\0"
-            VALUE "ProductName", "RustDesk" "\0"
+            VALUE "InternalName", "FlottIT-Connect" "\0"
+            VALUE "LegalCopyright", "FlottIT; basiert auf RustDesk (AGPL-3.0), Copyright Purslane Tech Pte. Ltd." "\0"
+            VALUE "OriginalFilename", "FlottIT-Connect.exe" "\0"
+            VALUE "ProductName", "FlottIT Connect" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
