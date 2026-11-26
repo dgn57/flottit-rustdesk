@@ -27,11 +27,12 @@ windows = { version = "0.61", features = [
 native-windows-gui = {version = "1.0", default-features = false, features = ["animation-timer", "image-decoder"]}
 
 [package.metadata.winres]
-LegalCopyright = "Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved."
-ProductName = "RustDesk"
-OriginalFilename = "rustdesk.exe"
-FileDescription = "RustDesk Remote Desktop"
-#ProductVersion = ""
+LegalCopyright = "FlottIT; basiert auf RustDesk (AGPL-3.0), Copyright Purslane Tech Pte. Ltd."
+ProductName = "FlottIT Techniker"
+CompanyName = "FlottIT"
+OriginalFilename = "FlottIT-Techniker.exe"
+FileDescription = "FlottIT Techniker - Fernwartung"
+ProductVersion = "1.5.3"
 
 [target.'cfg(target_os="windows")'.build-dependencies]
 winres = "0.1"
